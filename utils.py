@@ -21,7 +21,7 @@ def get_pages_count(driver: Chrome):
     pagination_block = driver.find_element_by_xpath('//ul[@class="pagination"]')
     buttons = pagination_block.find_elements_by_xpath('.//button[@class="page-link"]')
     try:
-        return int(buttons[-2].text)
+        return int(''.join(buttons[-2].text.split(',')))
     except (IndexError, ValueError):
         return None
 
