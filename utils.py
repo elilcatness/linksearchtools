@@ -36,3 +36,21 @@ def get_total_count(driver: Chrome):
             'display-summary__short-summary').text.split()[0].replace(',', ''))
     except (IndexError, ValueError):
         return 0
+
+
+def set_url_param(url: str, key, val):
+    params_block = url.split('/')[-1].split('?')
+    if len(params_block) == 1:
+        return f'{url}?{key}={val}'
+    elif f'{key}=' in url:
+        i = url.index(f'{key}=') + len(f'{key}=')
+        offset = 0
+        while url[i + offset] != '&' and i + offset < len(url) - 1:
+            offset += 1
+        return url[:i] + str(val) + url[i + offset:]
+    return url
+
+
+if __name__ == '__main__':
+    url = 'https://app.linkresearchtools.com/smart/report.php?gid=13114757#/source-pages?page=21'
+    print(set_url_param(url, 'page', '3'))
