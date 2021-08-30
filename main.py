@@ -2,6 +2,7 @@ import os
 import sys
 import time
 from csv import DictWriter
+from multiprocessing import Pool
 from random import randint
 
 from selenium.common.exceptions import NoSuchElementException
@@ -11,7 +12,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from cases import *
 from utils import *
-
 
 # Список кортежей ключ-значение функций-обработчиков иной обработки данных в столбцах таблицы
 HEADERS_CASES = [(lambda header, cell: 'url' in header.lower(), url_case),
@@ -37,6 +37,7 @@ def authorize(url, driver: Chrome, username, password, function_call=False):
 
 
 def parse_page(driver: Chrome, headers, page_count, total_count):
+    print('in parse_page')
     left_rows = driver.find_elements_by_xpath(
         '//*[@class="data-table__fixed-data data-table__fixed-data--left"]'
         '//div[starts-with(@class, "data-table__data-row-group")]'
@@ -70,11 +71,11 @@ def parse_page(driver: Chrome, headers, page_count, total_count):
                 if not processed:
                     item[header] = regular_case(cell)
         data.append(item)
-        print(f'Parsed {count}/{total_count}', flush=True, end='\r')
+        print(f'Parsed {count}/{total_count}')
     return data
 
 
-def parse_pages(driver: Chrome, url, headers):
+def parse_pages(driver: Chrome, url, headers, page_from, page_to):
     driver.get(url)
     # Ожидание, пока не загрузится таблица
     WebDriverWait(driver, 60).until(
@@ -89,11 +90,13 @@ def parse_pages(driver: Chrome, url, headers):
         print('Failed to get next button')
         sys.exit(-1)
     total_count = get_total_count(driver)
-    total_pages_count = get_pages_count(driver)
-    page_count = 1
+    page_count = page_from
     yield parse_page(driver, headers, page_count, total_count)
-    while page_count < total_pages_count:
-        next_btn.click()
+    for p in range(page_from + 1, page_to):
+        url = set_url_param(url, 'page', p)
+        driver.get(url)
+        print(f'button clicked ({total_count})')
+        # next_btn.click()
         # Ожидание, пока не разморозится таблица после перехода на новую страницу
         WebDriverWait(driver, 60).until_not(
             ec.presence_of_element_located((
@@ -101,11 +104,27 @@ def parse_pages(driver: Chrome, url, headers):
                 '//*[starts-with(@class, "data-table__loading")]')))
         page_count += 1
         yield parse_page(driver, headers, page_count, total_count)
-        next_btn = get_next_btn(driver)
+        # next_btn = get_next_btn(driver)
+
+
+def task(data: dict):
+    if not data.get('driver'):
+        driver = get_driver(os.path.join('binary', 'chromedriver.exe'))
+        authorized = authorize(data['login_url'], driver, data['username'], data['password'])
+        if isinstance(authorized, str):
+            return authorized
+    else:
+        driver = data['driver']
+        print('Основной поток (TASK)')
+    url = set_url_param(data['url'], 'page', data['from']) if data['from'] > 1 else data['url']
+    for rows in parse_pages(driver, url, data['headers'], data['from'], data['to']):
+        with open(data['output_filename'], 'a', newline='', encoding='utf-8') as f:
+            writer = DictWriter(f, data['headers'], delimiter=';')
+            writer.writerows(rows)
+    driver.close()
 
 
 def main(info_filename='info.txt', output_filename='output.csv'):
-    driver = get_driver(os.path.join('binary', 'chromedriver.exe'))
     with open(info_filename, encoding='utf-8') as f:
         lines = [line.strip() for line in f.readlines()]
         if not lines or len(lines) != 4:
@@ -117,22 +136,43 @@ def main(info_filename='info.txt', output_filename='output.csv'):
         except ValueError:
             return 'Invalid format of login data (username & password)'
         headers = headers.split(';')
-    authorized = authorize(login_url, driver, username, password)
-    if isinstance(authorized, str):
-        return authorized
     with open(output_filename, 'w', newline='', encoding='utf-8') as f:
         writer = DictWriter(f, headers, delimiter=';')
         writer.writeheader()
-    for data in parse_pages(driver, url, headers):
-        with open(output_filename, 'a', newline='', encoding='utf-8') as f:
-            writer = DictWriter(f, headers, delimiter=';')
-            writer.writerows(data)
+    processes_count = None
+    while not processes_count:
+        try:
+            processes_count = int(input('Введите количество потоков: '))
+        except ValueError:
+            print('Количество должно быть представлено в виде натурального числа больше 1')
+    driver = get_driver(os.path.join('binary', 'chromedriver.exe'))
+    authorized = authorize(login_url, driver, username, password)
+    if isinstance(authorized, str):
+        return f'{authorized} (main thread)'
+    driver.get(url)
+    WebDriverWait(driver, 60).until(
+        ec.presence_of_element_located((By.CLASS_NAME, 'data-table__data-body')))
+    pages_count = get_pages_count(driver)
+    if not pages_count:
+        return 'Не удаось получить'
+    pages_per_process = pages_count // processes_count
+    tasks = [{'from': (i * pages_per_process) + 1,
+              'to': (((i + 1) * pages_per_process) + 1 if i != processes_count - 1
+                     or ((i + 1) * pages_per_process) + 1 >= pages_count
+                     else (i * pages_per_process + (pages_count - i * pages_per_process)) + 1),
+              'login_url': login_url, 'username': username, 'password': password,
+              'url': url, 'headers': headers, 'output_filename': output_filename} for i in range(processes_count)]
+    print(f'tasks: {tasks}')
+    driver.close()
+    pool = Pool(processes=processes_count)
+    pool.map(task, tasks)
+    return processes_count
 
 
 if __name__ == '__main__':
     start_time = time.time()
     callback = main()
-    if callback:
+    if isinstance(callback, str):
         print(f'\n{callback}')
     else:
-        print(f'\nCompleted in: {time.time() - start_time:.2f} seconds')
+        print(f'\nВыполнено за: {time.time() - start_time:.2f} секунд. Кол-во потоков: {callback}')
